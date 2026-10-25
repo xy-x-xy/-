@@ -1,0 +1,139 @@
+# -*- coding: utf-8 -*-
+"""月份 & 年龄 深度归因分析"""
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib as mpl
+
+mpl.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei']
+mpl.rcParams['axes.unicode_minus'] = False
+mpl.rcParams['figure.dpi'] = 110
+
+# ---------- 读取与清洗（沿用上一步逻辑） ----------
+file_path = r"C:\Users\86182\Desktop\拼多多.csv"
+try:
+    df = pd.read_csv(file_path, encoding='utf-8')
+except UnicodeDecodeError:
+    df = pd.read_csv(file_path, encoding='gbk')
+df.columns = [c.strip() for c in df.columns]
+df['购买时间'] = pd.to_datetime(df['购买时间'], errors='coerce')
+for c in ['单价', '购买数量', '消费金额', '用户年龄']:
+    df[c] = pd.to_numeric(df[c], errors='coerce')
+df = df.dropna(subset=['用户ID', '消费金额', '购买时间', '用户年龄'])
+df['购买月份'] = df['购买时间'].dt.month
+
+# 年龄段
+bins = [0, 18, 25, 35, 45, 55, 100]
+labels = ['18以下', '18-25', '26-35', '36-45', '46-55', '55以上']
+df['年龄段'] = pd.cut(df['用户年龄'], bins=bins, labels=labels, right=False)
+
+# =========================================================
+# 分析一：月份归因 —— 拆成 用户数 × 人均频次 × 客单价
+# =========================================================
+print("=" * 60)
+print("【月份归因】")
+month_stat = df.groupby('购买月份').agg(
+    消费额=('消费金额', 'sum'),
+    订单数=('消费金额', 'size'),
+    用户数=('用户ID', 'nunique')
+)
+month_stat['人均频次'] = month_stat['订单数'] / month_stat['用户数']   # 每用户下单次数
+month_stat['客单价'] = month_stat['消费额'] / month_stat['订单数']     # 每单金额
+month_stat = month_stat.sort_index()
+print(month_stat.round(2))
+
+# =========================================================
+# 分析二：年龄归因 —— 同样三因子拆解
+# =========================================================
+print("\n" + "=" * 60)
+print("【年龄归因】")
+age_stat = df.groupby('年龄段', observed=True).agg(
+    消费额=('消费金额', 'sum'),
+    订单数=('消费金额', 'size'),
+    用户数=('用户ID', 'nunique')
+)
+age_stat['人均频次'] = age_stat['订单数'] / age_stat['用户数']
+age_stat['客单价'] = age_stat['消费额'] / age_stat['订单数']
+age_stat['人均消费'] = age_stat['消费额'] / age_stat['用户数']
+print(age_stat.round(2))
+
+# =========================================================
+# 分析三：55岁以上为什么高 —— 品类结构 & 集中度
+# =========================================================
+old = df[df['年龄段'] == '55以上']
+print("\n【55岁以上 品类消费占比】")
+print((old.groupby('商品类别')['消费金额'].sum()
+       .sort_values(ascending=False).head(10) / old['消费金额'].sum() * 100).round(1))
+
+# 集中度：少数用户是否拉动总额（帕累托）
+user_spend_old = old.groupby('用户ID')['消费金额'].sum().sort_values(ascending=False)
+top10_share = user_spend_old.head(max(1, int(len(user_spend_old)*0.1))).sum() / user_spend_old.sum()
+print(f"\n55岁以上 消费额 Top10% 用户贡献占比: {top10_share*100:.1f}%")
+
+# 和整体对比：各年龄段 客单价 & 品类偏好差异
+print("\n【各年龄段客单价】")
+print(age_stat[['客单价', '人均频次', '人均消费']].round(2))
+
+# 年龄段 × 品类 交叉（看55+是否偏爱电子/家电/保健）
+age_cat = df.pivot_table(index='年龄段', columns='商品类别',
+                         values='消费金额', aggfunc='sum', fill_value=0, observed=True)
+# 归一化看偏好（每年龄段内部占比）
+age_cat_pct = age_cat.div(age_cat.sum(axis=1), axis=0) * 100
+print("\n【各年龄段品类偏好占比(%) 前5品类】")
+top5_cat = age_cat.sum().sort_values(ascending=False).head(5).index
+print(age_cat_pct[top5_cat].round(1))
+
+# =========================================================
+# 分析四：月份 × 年龄 交叉 —— 看峰值月是不是某人群集中
+# =========================================================
+month_age = df.pivot_table(index='购买月份', columns='年龄段',
+                           values='消费金额', aggfunc='sum', fill_value=0, observed=True)
+print("\n【月份 × 年龄段 消费额交叉表】")
+print(month_age.round(0))
+
+# =========================================================
+# 可视化
+# =========================================================
+fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+fig.suptitle('月份 & 年龄 深度归因分析', fontsize=16, fontweight='bold')
+
+# 图1：月份三因子（双轴：订单数柱 + 客单价/人均频次线）
+ax = axes[0, 0]
+ax.bar(month_stat.index, month_stat['订单数'], color='#AED6F1', label='订单数')
+ax2 = ax.twinx()
+ax2.plot(month_stat.index, month_stat['客单价'], 'o-', color='#E74C3C', label='客单价')
+ax2.plot(month_stat.index, month_stat['人均频次']*1000, 's--', color='#27AE60', label='人均频次×1000')
+ax.set_title('月份：订单数 vs 客单价 vs 人均频次')
+ax.set_xlabel('月份'); ax.set_ylabel('订单数'); ax2.set_ylabel('客单价/频次')
+ax.legend(loc='upper left'); ax2.legend(loc='upper right')
+
+# 图2：年龄段三因子（人均消费 vs 客单价 vs 频次）
+ax = axes[0, 1]
+x = np.arange(len(age_stat)); w = 0.35
+ax.bar(x - w/2, age_stat['人均消费'], w, label='人均消费', color='#F39C12')
+ax.bar(x + w/2, age_stat['客单价'], w, label='客单价', color='#8E44AD')
+ax.set_xticks(x); ax.set_xticklabels(age_stat.index, rotation=30)
+ax.set_title('各年龄段：人均消费 vs 客单价'); ax.legend()
+ax.set_ylabel('元')
+
+# 图3：各年龄段品类偏好（堆叠百分比）
+ax = axes[1, 0]
+age_cat_pct[top5_cat].plot(kind='bar', stacked=True, ax=ax, colormap='tab10')
+ax.set_title('各年龄段 Top5 品类消费占比(%)')
+ax.set_ylabel('占比(%)'); ax.tick_params(axis='x', rotation=30)
+ax.legend(fontsize=8, bbox_to_anchor=(1, 1))
+
+# 图4：月份×年龄段 热力图
+ax = axes[1, 1]
+im = ax.imshow(month_age.values, aspect='auto', cmap='YlOrRd')
+ax.set_xticks(range(len(month_age.columns)))
+ax.set_xticklabels(month_age.columns, rotation=30)
+ax.set_yticks(range(len(month_age.index)))
+ax.set_yticklabels(month_age.index)
+ax.set_title('月份 × 年龄段 消费额热力图')
+ax.set_xlabel('年龄段'); ax.set_ylabel('月份')
+plt.colorbar(im, ax=ax, label='消费额')
+
+plt.tight_layout(rect=[0, 0, 1, 0.96])
+plt.savefig(r"C:\Users\86182\Desktop\月份年龄归因.png", bbox_inches='tight')
+plt.show()
